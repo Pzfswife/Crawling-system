@@ -1,0 +1,261 @@
+设计系统架构：
+爬虫节点：负责发送请求、解析页面和提取商品信息。
+Flink 流处理：对爬取到的商品信息进行实时处理，如数据清洗、去重等。
+Redis 缓存：用于存储待爬取的 URL 队列和已爬取的 URL 集合，避免重复爬取。
+Hadoop HDFS：作为分布式存储系统，用于存储爬取到的商品信息。
+2. 反反爬策略实现
+IP 代理池：使用第三方 IP 代理服务或自己搭建代理池，定期更换 IP 地址，避免被淘宝封禁。以下是一个简单的 Java 代码示例，用于从代理池中获取代理：
+java
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
+
+public class ProxyPool {
+    private static List<String> proxies = new ArrayList<>();
+
+    static {
+        // 添加代理 IP 和端口
+        proxies.add("127.0.0.1:8080");
+        proxies.add("127.0.0.2:8081");
+        // 可以添加更多代理
+    }
+
+    public static String getProxy() {
+        Random random = new Random();
+        int index = random.nextInt(proxies.size());
+        return proxies.get(index);
+    }
+}
+请求头设置：模拟浏览器行为，设置合适的请求头，如 User-Agent、Referer 等。以下是一个使用 Java 的 HttpURLConnection 发送请求并设置请求头的示例：
+java
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+
+public class HttpUtils {
+    public static String sendRequest(String urlStr) throws Exception {
+        URL url = new URL(urlStr);
+        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+        connection.setRequestMethod("GET");
+        connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3");
+        connection.setRequestProperty("Referer", "https://www.taobao.com");
+
+        BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()));
+        StringBuilder response = new StringBuilder();
+        String line;
+        while ((line = reader.readLine()) != null) {
+            response.append(line);
+        }
+        reader.close();
+        return response.toString();
+    }
+}
+请求频率控制：合理控制请求频率，避免过于频繁的请求被淘宝检测到。可以使用 Java 的 Thread.sleep() 方法来实现请求间隔。
+3. 编写爬虫代码
+URL 管理：使用 Redis 存储待爬取的 URL 队列和已爬取的 URL 集合。以下是一个简单的 Java 代码示例，用于操作 Redis：
+java
+import redis.clients.jedis.Jedis;
+
+public class RedisUtils {
+    private static Jedis jedis = new Jedis("localhost", 6379);
+
+    public static void addToQueue(String url) {
+        jedis.rpush("url_queue", url);
+    }
+
+    public static String getFromQueue() {
+        return jedis.lpop("url_queue");
+    }
+
+    public static boolean isCrawled(String url) {
+        return jedis.sismember("crawled_urls", url);
+    }
+
+    public static void markAsCrawled(String url) {
+        jedis.sadd("crawled_urls", url);
+    }
+}
+页面解析：使用 Java 的 HTML 解析库，如 Jsoup，来解析淘宝页面并提取商品信息。以下是一个简单的示例：
+java
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.select.Elements;
+
+public class PageParser {
+    public static void parsePage(String html) {
+        Document doc = Jsoup.parse(html);
+        Elements items = doc.select(".item.J_MouserOnverReq");
+        for (Element item : items) {
+            String title = item.select(".row.row-2.title").text();
+            String price = item.select(".price.g_price.g_price-highlight").text();
+            System.out.println("Title: " + title + ", Price: " + price);
+        }
+    }
+}
+爬虫主程序：编写一个主程序，负责从 Redis 队列中获取 URL，发送请求，解析页面，并将新的 URL 添加到队列中。
+java
+public class Crawler {
+    public static void main(String[] args) {
+        while (true) {
+            String url = RedisUtils.getFromQueue();
+            if (url == null) {
+                break;
+            }
+            if (RedisUtils.isCrawled(url)) {
+                continue;
+            }
+            try {
+                String html = HttpUtils.sendRequest(url);
+                PageParser.parsePage(html);
+                RedisUtils.markAsCrawled(url);
+                // 提取新的 URL 并添加到队列中
+                // ...
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
+4. 配置 Flink 流处理
+创建 Flink 项目：使用 Maven 或 Gradle 创建一个新的 Flink 项目，并添加必要的依赖。
+编写 Flink 程序：编写一个 Flink 程序，用于对爬取到的商品信息进行实时处理，如数据清洗、去重等。以下是一个简单的示例：
+java
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+
+public class FlinkProcessor {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // 从数据源读取数据
+        DataStream<String> input = env.socketTextStream("localhost", 9999);
+
+        // 数据处理
+        DataStream<String> result = input.filter(line -> line != null && !line.isEmpty());
+
+        // 输出结果
+        result.print();
+
+        // 执行任务
+        env.execute("Flink Processor");
+    }
+}
+第二天
+1. 集成 Flink 和爬虫
+将爬虫数据发送到 Flink：修改爬虫代码，将爬取到的商品信息发送到 Flink 程序的数据源中。可以使用 Socket 或 Kafka 等消息队列来实现数据传输。以下是一个使用 Socket 发送数据的示例：
+java
+import java.io.OutputStream;
+import java.net.Socket;
+
+public class DataSender {
+    public static void sendData(String data) {
+        try {
+            Socket socket = new Socket("localhost", 9999);
+            OutputStream outputStream = socket.getOutputStream();
+            outputStream.write(data.getBytes());
+            outputStream.flush();
+            outputStream.close();
+            socket.close();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+}
+在爬虫代码中调用 DataSender：在解析页面后，将商品信息发送到 Flink。
+java
+public class PageParser {
+    public static void parsePage(String html) {
+        Document doc = Jsoup.parse(html);
+        Elements items = doc.select(".item.J_MouserOnverReq");
+        for (Element item : items) {
+            String title = item.select(".row.row-2.title").text();
+            String price = item.select(".price.g_price.g_price-highlight").text();
+            String data = "Title: " + title + ", Price: " + price;
+            DataSender.sendData(data);
+        }
+    }
+}
+2. 数据存储到 Hadoop HDFS
+配置 Hadoop 客户端：在 Java 项目中添加 Hadoop 客户端依赖，并配置 Hadoop 的相关参数。
+将处理后的数据存储到 HDFS：在 Flink 程序中添加一个 HDFS 输出接收器，将处理后的数据存储到 HDFS 中。以下是一个简单的示例：
+java
+import org.apache.flink.core.fs.Path;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.sink.filesystem.StreamingFileSink;
+import org.apache.flink.streaming.api.functions.sink.filesystem.bucketassigners.DateTimeBucketAssigner;
+
+public class FlinkProcessor {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // 从数据源读取数据
+        DataStream<String> input = env.socketTextStream("localhost", 9999);
+
+        // 数据处理
+        DataStream<String> result = input.filter(line -> line != null && !line.isEmpty());
+
+        // 输出结果到 HDFS
+        StreamingFileSink<String> sink = StreamingFileSink
+               .forRowFormat(new Path("hdfs://localhost:9000/output"), new SimpleStringEncoder<String>("UTF-8"))
+               .withBucketAssigner(new DateTimeBucketAssigner<>())
+               .build();
+        result.addSink(sink);
+
+        // 执行任务
+        env.execute("Flink Processor");
+    }
+}
+
+taobao-crawler-project
+├── src
+│   ├── main
+│   │   ├── java
+│   │   │   ├── com
+│   │   │   │   ├── example
+│   │   │   │   │   ├── crawler
+│   │   │   │   │   │   ├── HttpUtils.java         // 负责发送 HTTP 请求的工具类
+│   │   │   │   │   │   ├── PageParser.java        // 解析淘宝页面的工具类
+│   │   │   │   │   │   ├── Crawler.java           // 爬虫主程序，负责协调 URL 管理、请求发送和页面解析
+│   │   │   │   │   │   ├── DataSender.java        // 将爬取数据发送到 Flink 的类
+│   │   │   │   │   │   ├── ProxyPool.java         // IP 代理池相关类
+│   │   │   │   │   │   ├── RedisUtils.java        // 操作 Redis 的工具类
+│   │   │   │   │   ├── flink
+│   │   │   │   │   │   ├── FlinkProcessor.java    // Flink 数据处理程序
+│   │   │   │   │   ├── hadoop
+│   │   │   │   │   │   ├── HadoopUtils.java       // 操作 Hadoop HDFS 的工具类（如文件写入等）
+│   │   │   │   │   ├── App.java                   // 项目入口类，用于启动整个系统相关组件
+│   │   │   │   ├── resources
+│   │   │   │   │   ├── log4j.properties           // 日志配置文件（如果使用 log4j 记录日志）
+│   │   │   │   │   ├── flink-conf.yaml            // Flink 配置文件（可根据需要调整）
+│   │   │   │   │   ├── hadoop-site.xml            // Hadoop 相关配置文件（部分配置也可通过代码设置）
+│   │   │   │   │   ├── redis-config.properties    // Redis 配置文件（如连接地址、端口等）
+│   │   │   │
+│   │   ├── resources
+│   │   │   └── META-INF
+│   │   │       └── MANIFEST.MF                    // 项目打包时的清单文件（如果需要打包成可执行 jar）
+│   │   └── scala
+│   │       └── com
+│   │           └── example
+│   │               └── flink
+│   │                   └── ScalaFlinkProcessor.scala // 如果使用 Scala 编写 Flink 程序，可放在这里（可选）
+│   └── test
+│       ├── java
+│       │   └── com
+│       │       └── example
+│       │           ├── crawler
+│       │           │   ├── HttpUtilsTest.java     // HttpUtils 类的单元测试
+│       │           │   ├── PageParserTest.java    // PageParser 类的单元测试
+│       │           │   ├── CrawlerTest.java       // Crawler 类的单元测试
+│       │           ├── flink
+│       │           │   ├── FlinkProcessorTest.java// FlinkProcessor 类的单元测试
+│       │           └── hadoop
+│       │               └── HadoopUtilsTest.java   // HadoopUtils 类的单元测试
+│       └── resources
+│           └── test.properties                    // 测试相关的配置文件
+├── pom.xml                                       // Maven 项目的依赖管理和构建配置文件
+├── build.gradle                                  // Gradle 项目的构建配置文件（如果使用 Gradle 构建）
+├── README.md                                     // 项目说明文档，介绍项目功能、使用方法等
+└── LICENSE                                         // 项目的许可证文件（如果有）
